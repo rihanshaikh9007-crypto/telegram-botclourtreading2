@@ -20,7 +20,8 @@ InlineKeyboardButton.to_dict = custom_to_dict
 
 # ================= 1. TOKENS & DB CONFIG =================
 # Supabase PostgreSQL Link
-DATABASE_URL = "postgresql://postgres:AgfDj*G*Cj4qWqM@db.jhhmwbivhohvcicyuxqe.supabase.co:5432/postgres"
+DATABASE_URL = "postgresql://postgres.jhhmwbivhohvcicyuxqe:mQcGVnP7gMFHQjYE@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres
+"
 
 MAIN_TOKEN = "8645722066:AAFSnOXF-6WCgkrTrZ-4OiMsI3QX13zhm7Y"
 DEPOSIT_TOKEN = "8632940940:AAEFodamODSaY3EdsuY4s24P-Gq-pcHrB1o"
