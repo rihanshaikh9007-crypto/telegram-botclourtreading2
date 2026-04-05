@@ -23,7 +23,7 @@ InlineKeyboardButton.to_dict = custom_to_dict
 # ================= 1. TOKENS & DB CONFIG =================
 DATABASE_URL = "postgresql://postgres.jhhmwbivhohvcicyuxqe:mQcGVnP7gMFHQjYE@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres?sslmode=require"
 
-MAIN_TOKEN = "8613886890:AAEmOMa9ElaMCEAI7CC1MrKcoO2d87jLPYI"
+MAIN_TOKEN = "8645722066:AAGxOfVbeF2HdClK-XqGzACHbcvd01iVLsA"
 FINANCE_TOKEN = "8632940940:AAEFodamODSaY3EdsuY4s24P-Gq-pcHrB1o"
 PREDICTION_TOKEN = "8741890267:AAG741wMz_dbnoSkR2GYhK-4spN71Lso4J4" 
 
