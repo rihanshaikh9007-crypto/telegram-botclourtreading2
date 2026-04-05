@@ -3,6 +3,7 @@ from flask import Flask
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import psycopg2
+from psycopg2 import pool
 import threading
 import time
 import random
@@ -19,10 +20,8 @@ def custom_to_dict(self):
 InlineKeyboardButton.to_dict = custom_to_dict
 
 # ================= 1. TOKENS & DB CONFIG =================
-# Supabase PostgreSQL Link with Password and SSL Security
 DATABASE_URL = "postgresql://postgres.jhhmwbivhohvcicyuxqe:mQcGVnP7gMFHQjYE@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres?sslmode=require"
 
-# 🚨 NAYA MAIN TOKEN YAHAN ADD HO GAYA HAI 🚨
 MAIN_TOKEN = "8645722066:AAGxOfVbeF2HdClK-XqGzACHbcvd01iVLsA"
 DEPOSIT_TOKEN = "8632940940:AAEFodamODSaY3EdsuY4s24P-Gq-pcHrB1o"
 PREDICTION_TOKEN = "8711568633:AAHAnNKdG7XkawHOPD2insGmPgDgwY095X0" 
@@ -32,8 +31,9 @@ PREDICTION_CHANNEL = "@PREDICTOIN_BOT_AI"
 SUPPORT_USERNAME = "@BOTTREADINGSUPPORT" 
 BOT_USERNAME = "CLOUR_TREADING_PROFIT_BOT" 
 
-bot_main = telebot.TeleBot(MAIN_TOKEN)
-bot_finance = telebot.TeleBot(DEPOSIT_TOKEN)
+# High speed threads enabled
+bot_main = telebot.TeleBot(MAIN_TOKEN, num_threads=20)
+bot_finance = telebot.TeleBot(DEPOSIT_TOKEN, num_threads=10)
 bot_deposit = bot_finance
 bot_withdraw = bot_finance
 bot_prediction = telebot.TeleBot(PREDICTION_TOKEN)
@@ -45,9 +45,17 @@ try:
     time.sleep(1)
 except: pass
 
-# ================= 2. POSTGRESQL DATABASE SETUP =================
+# ================= 2. FAST CONNECTION POOLING =================
+db_pool = pool.SimpleConnectionPool(1, 50, DATABASE_URL)
+
 def get_db():
-    return psycopg2.connect(DATABASE_URL)
+    return db_pool.getconn()
+
+def release_db(conn):
+    try:
+        conn.commit()
+        db_pool.putconn(conn)
+    except: pass
 
 def init_db():
     conn = get_db()
@@ -62,8 +70,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS promo_codes (code TEXT PRIMARY KEY, amount REAL, uses_left INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS promo_used (user_id BIGINT, code TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS period_data (mode TEXT PRIMARY KEY, period_id TEXT, number TEXT, color TEXT, size TEXT)''')
-    conn.commit()
-    conn.close()
+    release_db(conn)
 
 init_db()
 
@@ -73,13 +80,13 @@ def get_user(user_id):
     res = c.fetchone()
     if not res:
         c.execute("INSERT INTO users (user_id, balance, state, temp_data, refer_count) VALUES (%s, 0, 'idle', '', 0) ON CONFLICT (user_id) DO NOTHING", (user_id,))
-        conn.commit(); res = (0, 'idle', '', 0)
-    conn.close(); return res
+        res = (0, 'idle', '', 0)
+    release_db(conn); return res
 
 def update_user(user_id, **kwargs):
     conn = get_db(); c = conn.cursor()
     for key, value in kwargs.items(): c.execute(f"UPDATE users SET {key}=%s WHERE user_id=%s", (value, user_id))
-    conn.commit(); conn.close()
+    release_db(conn)
 
 # ================= 3. ADMIN COMMANDS =================
 @bot_main.message_handler(commands=['admin'])
@@ -97,7 +104,7 @@ def admin_actions(call):
     if action == "wallet":
         conn = get_db(); c = conn.cursor()
         c.execute("SELECT total_commission FROM admin_wallet WHERE id=1")
-        bal = c.fetchone()[0]; conn.close()
+        bal = c.fetchone()[0]; release_db(conn)
         bot_main.answer_callback_query(call.id, f"💼 Aapka Total 15% Commission: ₹{bal}", show_alert=True)
 
 # ================= 5. START MENU =================
@@ -188,7 +195,7 @@ def show_trends(call):
     mode = call.data.split("_")[1]
     conn = get_db(); c = conn.cursor()
     c.execute("SELECT period, number, size, color FROM game_trends WHERE mode=%s ORDER BY id DESC LIMIT 10", (mode,))
-    records = c.fetchall(); conn.close()
+    records = c.fetchall(); release_db(conn)
     if not records:
         bot_main.answer_callback_query(call.id, "Thoda wait karein, game history update ho rahi hai!", show_alert=True)
         return
@@ -219,7 +226,7 @@ def show_history(call):
     user_id = call.from_user.id
     conn = get_db(); c = conn.cursor()
     c.execute("SELECT action, amount, detail, timestamp FROM history WHERE user_id=%s ORDER BY id DESC LIMIT 5", (user_id,))
-    records = c.fetchall(); conn.close()
+    records = c.fetchall(); release_db(conn)
     if not records:
         bot_main.send_message(user_id, "📭 Aapki koi bet history nahi hai.")
         return
@@ -259,7 +266,7 @@ def handle_inputs(message):
                 parts = temp.split("_"); prediction = parts[1]; mode = parts[2]
                 c.execute("INSERT INTO active_bets (user_id, mode, prediction, amount) VALUES (%s, %s, %s, %s)", (user_id, mode, prediction, amt))
                 c.execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Bet Placed', %s, %s)", (user_id, amt, f"Mode: {mode}M, Choice: {prediction.upper()}"))
-                conn.commit(); conn.close()
+                release_db(conn)
                 bot_main.send_message(user_id, f"✅ *Bet Placed Successfully!*\n🎮 Mode: WINGO {mode} MIN\n🎯 Choice: {prediction.upper()}\n💰 Amount: ₹{amt}\n💳 Remaining Balance: ₹{bal-amt}", parse_mode="Markdown")
             else: bot_main.send_message(user_id, "❌ Balance kam hai.")
         else: bot_main.send_message(user_id, "❌ Limit: ₹10 - ₹10,000")
@@ -294,7 +301,7 @@ def handle_inputs(message):
             conn = get_db(); c = conn.cursor()
             c.execute("UPDATE users SET balance = balance - %s WHERE user_id=%s", (amt, user_id))
             c.execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Withdraw Requested', %s, %s)", (user_id, amt, f"UPI: {upi_or_phone}"))
-            conn.commit(); conn.close()
+            release_db(conn)
         except: bot_main.send_message(user_id, "❌ Error connecting to admin bot.")
         update_user(user_id, state="idle", temp_data="")
 
@@ -303,7 +310,7 @@ def handle_inputs(message):
         conn = get_db(); c = conn.cursor()
         c.execute("SELECT * FROM promo_used WHERE user_id=%s AND code=%s", (user_id, code))
         if c.fetchone():
-            bot_main.send_message(user_id, "❌ Aap ye promo code pehle hi use kar chuke hain."); update_user(user_id, state="idle"); conn.close(); return
+            bot_main.send_message(user_id, "❌ Aap ye promo code pehle hi use kar chuke hain."); update_user(user_id, state="idle"); release_db(conn); return
         c.execute("SELECT amount, uses_left FROM promo_codes WHERE code=%s", (code,))
         promo = c.fetchone()
         if promo and promo[1] > 0:
@@ -311,10 +318,12 @@ def handle_inputs(message):
             c.execute("UPDATE users SET balance = balance + %s WHERE user_id=%s", (p_amt, user_id))
             c.execute("UPDATE promo_codes SET uses_left = uses_left - 1 WHERE code=%s", (code,))
             c.execute("INSERT INTO promo_used (user_id, code) VALUES (%s, %s)", (user_id, code))
-            conn.commit()
+            release_db(conn)
             bot_main.send_message(user_id, f"🎉 *YAY!* Promo Code Applied!\n🎁 *₹{p_amt}* added to your wallet.", parse_mode="Markdown")
-        else: bot_main.send_message(user_id, "❌ Invalid Promo Code ya Limit khatam ho chuki hai.")
-        update_user(user_id, state="idle"); conn.close()
+        else:
+            bot_main.send_message(user_id, "❌ Invalid Promo Code ya Limit khatam ho chuki hai.")
+            release_db(conn)
+        update_user(user_id, state="idle")
 
 # ================= 8. ADMIN APPROVAL BOTS =================
 @bot_finance.callback_query_handler(func=lambda call: call.data.split('_')[0] in ["dapp", "drej", "wapp", "wrej"])
@@ -326,7 +335,7 @@ def finance_admin(call):
         amt = float(data[2]); bal, _, _, _ = get_user(user_id); update_user(user_id, balance=bal+amt)
         try:
             conn = get_db(); conn.cursor().execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Deposit Approved', %s, 'Via Admin')", (user_id, amt))
-            conn.commit(); conn.close()
+            release_db(conn)
         except: pass
         try: bot_finance.edit_message_caption(f"✅ ₹{amt} Approved for {user_id}", call.message.chat.id, call.message.message_id)
         except: bot_finance.edit_message_text(f"✅ ₹{amt} Approved for {user_id}", call.message.chat.id, call.message.message_id)
@@ -345,7 +354,7 @@ def finance_admin(call):
         amt = float(data[2]); bal, _, _, _ = get_user(user_id); update_user(user_id, balance=bal+amt)
         try:
             conn = get_db(); conn.cursor().execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Withdraw Rejected', %s, 'Refunded')", (user_id, amt))
-            conn.commit(); conn.close()
+            release_db(conn)
         except: pass
         bot_finance.edit_message_text(f"❌ Withdraw Rejected", call.message.chat.id, call.message.message_id)
         bot_main.send_message(user_id, "❌ Withdraw Reject ho gaya hai. Balance wapas add kar diya gaya hai.")
@@ -403,12 +412,11 @@ def run_game_engine(mode, total_seconds):
             c.execute("SELECT number FROM period_data WHERE mode=%s AND period_id=%s", (mode, period_id))
             if not c.fetchone():
                 c.execute("INSERT INTO period_data (mode, period_id, number, color, size) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (mode) DO UPDATE SET period_id=EXCLUDED.period_id, number=EXCLUDED.number, color=EXCLUDED.color, size=EXCLUDED.size", (mode, period_id, str(number), color_text, size))
-                conn.commit()
                 try:
                     msg = f"🔮 *LIVE WINGO {mode} MIN PREDICTION*\n\n🆔 Period: `{period_id}`\n🎯 Expected Color: *{color_text}*\n🎯 Expected Size: *{size.upper()}*\n🔢 Expected Number: *{number}*\n\n⏳ Result in {time_left} Seconds! Bet Now!"
                     bot_prediction.send_message(PREDICTION_CHANNEL, msg, parse_mode="Markdown")
                 except: pass
-            conn.close()
+            release_db(conn)
 
             number_str = str(number)
             if color_text == "GREEN": color_codes = ["grn"]
@@ -421,7 +429,7 @@ def run_game_engine(mode, total_seconds):
             
             conn = get_db(); c = conn.cursor()
             c.execute("SELECT id FROM game_trends WHERE mode=%s AND period=%s", (mode, period_id))
-            if c.fetchone(): conn.close(); continue
+            if c.fetchone(): release_db(conn); continue
                 
             c.execute("INSERT INTO game_trends (mode, period, number, color, size) VALUES (%s, %s, %s, %s, %s)", (mode, period_id, number, color_text, size))
             c.execute("SELECT id, user_id, prediction, amount FROM active_bets WHERE mode=%s", (mode,))
@@ -450,7 +458,7 @@ def run_game_engine(mode, total_seconds):
                     except: pass
                 c.execute("DELETE FROM active_bets WHERE id=%s", (bet_id,))
                 
-            conn.commit(); conn.close()
+            release_db(conn)
         except Exception as e: print(f"Engine Error: {e}"); time.sleep(3)
 
 # ================= 11. FLASK SERVER =================
@@ -461,8 +469,8 @@ def home(): return "🚀 Wingo Platform is Live on Render & Supabase!"
 # ================= 12. RUN BOTS & ENGINES =================
 if __name__ == "__main__":
     print("🚀 All Bots & Game Engines Running...")
-    threading.Thread(target=lambda: bot_main.infinity_polling(allowed_updates=['message', 'callback_query', 'chat_join_request'])).start()
-    threading.Thread(target=lambda: bot_finance.infinity_polling()).start()
+    threading.Thread(target=lambda: bot_main.infinity_polling(skip_pending=True)).start()
+    threading.Thread(target=lambda: bot_finance.infinity_polling(skip_pending=True)).start()
     threading.Thread(target=run_game_engine, args=('1', 60)).start()       
     threading.Thread(target=run_game_engine, args=('2', 120)).start()      
     threading.Thread(target=run_game_engine, args=('3', 180)).start()      
