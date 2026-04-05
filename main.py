@@ -9,6 +9,7 @@ import time
 import random
 import io
 from PIL import Image, ImageDraw, ImageFont
+from telebot.apihelper import ApiTelegramException
 
 # ================= 0. MAGIC COLOR FIX =================
 original_to_dict = InlineKeyboardButton.to_dict
@@ -22,18 +23,17 @@ InlineKeyboardButton.to_dict = custom_to_dict
 # ================= 1. TOKENS & DB CONFIG =================
 DATABASE_URL = "postgresql://postgres.jhhmwbivhohvcicyuxqe:mQcGVnP7gMFHQjYE@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres?sslmode=require"
 
-MAIN_TOKEN = "8645722066:AAGxOfVbeF2HdClK-XqGzACHbcvd01iVLsA"
-DEPOSIT_TOKEN = "8632940940:AAEFodamODSaY3EdsuY4s24P-Gq-pcHrB1o"
-PREDICTION_TOKEN = "8711568633:AAHAnNKdG7XkawHOPD2insGmPgDgwY095X0" 
+MAIN_TOKEN = "8613886890:AAEmOMa9ElaMCEAI7CC1MrKcoO2d87jLPYI"
+FINANCE_TOKEN = "8632940940:AAEFodamODSaY3EdsuY4s24P-Gq-pcHrB1o"
+PREDICTION_TOKEN = "8741890267:AAG741wMz_dbnoSkR2GYhK-4spN71Lso4J4" 
 
 ADMIN_ID = 1484173564
-PREDICTION_CHANNEL = "@PREDICTOIN_BOT_AI" 
+PREDICTION_CHANNEL = "@zxpreadictoin" 
 SUPPORT_USERNAME = "@BOTTREADINGSUPPORT" 
 BOT_USERNAME = "CLOUR_TREADING_PROFIT_BOT" 
 
-# Memory optimized threads for Render Free Tier
 bot_main = telebot.TeleBot(MAIN_TOKEN, num_threads=3)
-bot_finance = telebot.TeleBot(DEPOSIT_TOKEN, num_threads=2)
+bot_finance = telebot.TeleBot(FINANCE_TOKEN, num_threads=2)
 bot_deposit = bot_finance
 bot_withdraw = bot_finance
 bot_prediction = telebot.TeleBot(PREDICTION_TOKEN)
@@ -45,8 +45,7 @@ try:
     time.sleep(1)
 except: pass
 
-# ================= 2. SAFE THREADED CONNECTION POOL =================
-# Safe thread pool to prevent hanging
+# ================= 2. POSTGRESQL DATABASE SETUP =================
 try:
     db_pool = ThreadedConnectionPool(1, 10, DATABASE_URL)
 except Exception as e:
@@ -79,6 +78,16 @@ def init_db():
 
 init_db()
 
+def user_exists(user_id):
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users WHERE user_id=%s", (user_id,))
+        exists = c.fetchone() is not None
+        return exists
+    finally:
+        release_db(conn)
+
 def get_user(user_id):
     conn = get_db()
     try:
@@ -87,7 +96,8 @@ def get_user(user_id):
         res = c.fetchone()
         if not res:
             c.execute("INSERT INTO users (user_id, balance, state, temp_data, refer_count) VALUES (%s, 0, 'idle', '', 0) ON CONFLICT (user_id) DO NOTHING", (user_id,))
-            conn.commit(); res = (0, 'idle', '', 0)
+            conn.commit()
+            res = (0, 'idle', '', 0)
         return res
     finally:
         release_db(conn)
@@ -102,7 +112,7 @@ def update_user(user_id, **kwargs):
     finally:
         release_db(conn)
 
-# ================= 3. ADMIN COMMANDS =================
+# ================= 3. BOSS LEVEL ADMIN COMMANDS =================
 @bot_main.message_handler(commands=['admin'])
 def admin_panel(message):
     if message.from_user.id != ADMIN_ID: return
@@ -110,67 +120,288 @@ def admin_panel(message):
     markup.row(InlineKeyboardButton("➕ Add Channel", callback_data="admin_add_channel", **{'style': 'primary'}), 
                InlineKeyboardButton("💼 My Wallet", callback_data="admin_wallet", **{'style': 'success'}))
     markup.row(InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast", **{'style': 'danger'}))
-    bot_main.send_message(ADMIN_ID, "🛠️ *BOSS ADMIN PANEL*", reply_markup=markup, parse_mode="Markdown")
+    
+    admin_text = (
+        "🛠️ *BOSS ADMIN PANEL*\n\n"
+        "Extra Commands:\n"
+        "📊 `/livebets` - Dekho kis rang par kitna paisa laga hai\n"
+        "💰 `/addbalance UserID Amount` - Balance badhao\n"
+        "✂️ `/cutbalance UserID Amount` - Balance kaato\n"
+        "🎁 `/createpromo CODE Amount Uses` - Lifafa banao\n"
+    )
+    bot_main.send_message(ADMIN_ID, admin_text, reply_markup=markup, parse_mode="Markdown")
+
+@bot_main.message_handler(commands=['livebets'])
+def live_tracker(message):
+    if message.from_user.id != ADMIN_ID: return
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT mode, prediction, SUM(amount) FROM active_bets GROUP BY mode, prediction")
+        records = c.fetchall()
+    finally: release_db(conn)
+    
+    if not records:
+        bot_main.send_message(ADMIN_ID, "📭 Abhi koi active bet nahi hai.")
+        return
+        
+    text = "📊 *LIVE BET TRACKER*\n━━━━━━━━━━━━━━━━━━\n"
+    for r in records:
+        text += f"🎮 Mode: *{r[0]} Min* | Choice: *{r[1].upper()}* | Total: ₹{r[2]}\n"
+    bot_main.send_message(ADMIN_ID, text, parse_mode="Markdown")
+
+@bot_main.message_handler(commands=['addbalance', 'cutbalance'])
+def manual_balance(message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        cmd, target_id, amount = message.text.split()
+        target_id, amount = int(target_id), float(amount)
+        bal, _, _, _ = get_user(target_id)
+        
+        if cmd == "/addbalance":
+            new_bal = bal + amount
+            action_text = "Added"
+        else:
+            new_bal = max(0, bal - amount)
+            action_text = "Deducted"
+            
+        update_user(target_id, balance=new_bal)
+        bot_main.send_message(ADMIN_ID, f"✅ Success! ₹{amount} {action_text}. New Balance: ₹{new_bal}")
+        bot_main.send_message(target_id, f"🔔 Admin Update: ₹{amount} has been {action_text} from your wallet. Current Balance: ₹{new_bal}")
+    except:
+        bot_main.send_message(ADMIN_ID, "❌ Syntax Error! Use: `/addbalance UserID Amount`", parse_mode="Markdown")
+
+@bot_main.message_handler(commands=['createpromo'])
+def create_promo(message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        _, code, amount, uses = message.text.split()
+        amount, uses = float(amount), int(uses)
+        code = code.upper()
+        
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute("INSERT INTO promo_codes (code, amount, uses_left) VALUES (%s, %s, %s) ON CONFLICT (code) DO UPDATE SET amount=EXCLUDED.amount, uses_left=EXCLUDED.uses_left", (code, amount, uses))
+            conn.commit()
+        finally: release_db(conn)
+        
+        bot_main.send_message(ADMIN_ID, f"🎁 *Promo Code Created!*\n\nCode: `{code}`\nAmount: ₹{amount}\nUses: {uses}", parse_mode="Markdown")
+    except:
+        bot_main.send_message(ADMIN_ID, "❌ Syntax Error! Use: `/createpromo CODE AMOUNT USES`", parse_mode="Markdown")
 
 @bot_main.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
 def admin_actions(call):
     action = call.data.split("_")[1]
-    if action == "wallet":
+    if action == "add":
+        msg = bot_main.send_message(ADMIN_ID, "Step 1: Bot ko channel me Admin banayein.\nStep 2: Channel ka ID (e.g. -100123...) bhejein:")
+        bot_main.register_next_step_handler(msg, verify_admin_and_ask_color)
+    elif action == "wallet":
         conn = get_db()
         try:
             c = conn.cursor()
             c.execute("SELECT total_commission FROM admin_wallet WHERE id=1")
             bal = c.fetchone()[0]
-        finally:
-            release_db(conn)
+        finally: release_db(conn)
         bot_main.answer_callback_query(call.id, f"💼 Aapka Total 15% Commission: ₹{bal}", show_alert=True)
+    elif action == "broadcast":
+        msg = bot_main.send_message(ADMIN_ID, "📢 Jo message sabko bhejna hai, wo type karein:")
+        bot_main.register_next_step_handler(msg, process_broadcast)
 
-# ================= 5. START MENU =================
+def process_broadcast(message):
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users")
+        users = c.fetchall()
+    finally: release_db(conn)
+    sent = 0
+    bot_main.send_message(ADMIN_ID, "⏳ Broadcasting started...")
+    for u in users:
+        try:
+            bot_main.send_message(u[0], f"📢 *Admin Update*\n\n{message.text}", parse_mode="Markdown")
+            sent += 1
+        except: pass
+    bot_main.send_message(ADMIN_ID, f"✅ Broadcast sent successfully to {sent} users!")
+
+def verify_admin_and_ask_color(message):
+    chat_id = message.text.strip()
+    try:
+        chat_info = bot_main.get_chat(chat_id)
+        member = bot_main.get_chat_member(chat_id, bot_main.get_me().id)
+        
+        if member.status in ['administrator', 'creator']:
+            try:
+                invite_link_obj = bot_main.create_chat_invite_link(chat_id, creates_join_request=True)
+                invite_link = invite_link_obj.invite_link
+            except ApiTelegramException as e:
+                try:
+                    invite_link = bot_main.export_chat_invite_link(chat_id)
+                except ApiTelegramException as e_inner:
+                    bot_main.send_message(ADMIN_ID, f"❌ *Error:* Bot ke paas invite link banane ki permission nahi hai.", parse_mode="Markdown")
+                    return
+
+            update_user(ADMIN_ID, state="wait_color", temp_data=f"{chat_id}|{chat_info.title}|{invite_link}")
+            
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("GREEN", callback_data="setcol_success", **{'style': 'success'}), 
+                       InlineKeyboardButton("RED", callback_data="setcol_danger", **{'style': 'danger'}))
+            markup.row(InlineKeyboardButton("BLUE", callback_data="setcol_primary", **{'style': 'primary'}), 
+                       InlineKeyboardButton("NORMAL", callback_data="setcol_normal")) 
+            bot_main.send_message(ADMIN_ID, f"✅ Bot '{chat_info.title}' mein Admin hai aur Invite Link ban gaya hai!\n\nJoin Button ka **Color** select karein:", reply_markup=markup)
+        else:
+            bot_main.send_message(ADMIN_ID, f"❌ *Error:* Bot channel mein hai, lekin *Administrator* nahi hai. Pehle Admin banao.", parse_mode="Markdown")
+            
+    except ApiTelegramException as e:
+        if e.error_code == 400: bot_main.send_message(ADMIN_ID, f"❌ *Error:* Chat mil nahi rahi hai. ID galat hai.", parse_mode="Markdown")
+        elif e.error_code == 403: bot_main.send_message(ADMIN_ID, f"❌ *Error:* Bot blocked ya kicked hai.", parse_mode="Markdown")
+        else: bot_main.send_message(ADMIN_ID, f"❌ *Error:* {e.description}", parse_mode="Markdown")
+    except Exception as e:
+        bot_main.send_message(ADMIN_ID, f"❌ *Error:* {e}", parse_mode="Markdown")
+
+@bot_main.callback_query_handler(func=lambda call: call.data.startswith("setcol_"))
+def save_channel_final(call):
+    color_style = call.data.split("_")[1]
+    _, _, temp_data, _ = get_user(ADMIN_ID)
+    if temp_data:
+        chat_id, title, invite_link = temp_data.split("|")
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute("INSERT INTO channels (chat_id, name, color, invite_link) VALUES (%s, %s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET name=EXCLUDED.name, color=EXCLUDED.color, invite_link=EXCLUDED.invite_link", (chat_id, title, color_style, invite_link))
+            conn.commit()
+        finally: release_db(conn)
+        bot_main.edit_message_text(f"✅ Channel '{title}' add ho gaya!", call.message.chat.id, call.message.message_id)
+        update_user(ADMIN_ID, state="idle", temp_data="")
+
+# ================= 4. JOIN REQUEST AUTO-APPROVE =================
+@bot_main.chat_join_request_handler()
+def approve_join_request(message):
+    try:
+        bot_main.approve_chat_join_request(message.chat.id, message.from_user.id)
+        bot_main.send_message(message.from_user.id, f"✅ Aapki {message.chat.title} ki Join Request approve ho gayi hai! Ab 'Try Again' click karein.")
+    except: pass
+
+# ================= 5. START MENU & FORCE SUB =================
 @bot_main.message_handler(commands=['start'])
 def user_start(message):
     user_id = message.from_user.id
+    
+    args = message.text.split()
+    if len(args) > 1 and args[1].isdigit():
+        referrer_id = int(args[1])
+        if referrer_id != user_id and not user_exists(user_id):
+            conn = get_db()
+            try:
+                c = conn.cursor()
+                c.execute("UPDATE users SET refer_count = refer_count + 1 WHERE user_id=%s", (referrer_id,))
+                conn.commit()
+            finally: release_db(conn)
+
     get_user(user_id) 
-    send_main_menu(user_id, message.from_user.first_name)
+    
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT chat_id, name, color, invite_link FROM channels")
+        channels = c.fetchall()
+    finally: release_db(conn)
+    
+    not_joined = []
+    for ch_id, name, color, invite_link in channels:
+        try:
+            status = bot_main.get_chat_member(ch_id, user_id).status
+            if status in ['left', 'kicked']: not_joined.append((name, color, invite_link))
+        except: not_joined.append((name, color, invite_link))
+
+    if not_joined:
+        markup = InlineKeyboardMarkup()
+        for name, color, invite_link in not_joined:
+            if color in ['success', 'danger', 'primary']:
+                markup.add(InlineKeyboardButton(f"Join {name}", url=invite_link, **{'style': color}))
+            else:
+                markup.add(InlineKeyboardButton(f"Join {name}", url=invite_link))
+                
+        markup.add(InlineKeyboardButton("🔄 Try Again", callback_data="check_join", **{'style': 'primary'}))
+        bot_main.send_photo(user_id, photo='https://files.catbox.moe/my6qos.jpg', caption="⚠️ Aage badhne ke liye sabhi channels Join karein!", reply_markup=markup)
+    else:
+        send_main_menu(user_id, message.from_user.first_name)
+
+@bot_main.callback_query_handler(func=lambda call: call.data == "check_join")
+def recheck_join(call):
+    bot_main.delete_message(call.message.chat.id, call.message.message_id)
+    user_start(call.message)
 
 def send_main_menu(user_id, name):
     balance, _, _, _ = get_user(user_id)
-    text = f"✨ *Hello {name}!* ✨\n\n💰 *Your Balance:* `₹{balance}`\n━━━━━━━━━━━━━━━━━━\n🚀 *Apna Game Mode chunein aur Earning shuru karein!*"
+    text = (
+        f"✨ *Hello {name}!* ✨\n\n"
+        f"💰 *Your Balance:* `₹{balance}`\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🚀 *Apna Game Mode chunein aur Earning shuru karein!*"
+    )
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("⏱ 1 MIN", callback_data="wingo_1", **{'style': 'primary'}), InlineKeyboardButton("⏳ 2 MIN", callback_data="wingo_2", **{'style': 'primary'}))
-    markup.row(InlineKeyboardButton("🕒 3 MIN", callback_data="wingo_3", **{'style': 'primary'}), InlineKeyboardButton("🕓 5 MIN", callback_data="wingo_5", **{'style': 'primary'}))
+    markup.row(InlineKeyboardButton("⏱ 1 MIN", callback_data="wingo_1", **{'style': 'primary'}), 
+               InlineKeyboardButton("⏳ 2 MIN", callback_data="wingo_2", **{'style': 'primary'}))
+    markup.row(InlineKeyboardButton("🕒 3 MIN", callback_data="wingo_3", **{'style': 'primary'}), 
+               InlineKeyboardButton("🕓 5 MIN", callback_data="wingo_5", **{'style': 'primary'}))
     markup.row(InlineKeyboardButton("🕔 15 MIN", callback_data="wingo_15", **{'style': 'primary'}))
-    markup.row(InlineKeyboardButton("💳 DEPOSIT", callback_data="deposit", **{'style': 'success'}), InlineKeyboardButton("📤 WITHDRAW", callback_data="withdraw", **{'style': 'danger'}))
-    markup.row(InlineKeyboardButton("📜 MY BETS", callback_data="history", **{'style': 'primary'}), InlineKeyboardButton("👥 REFER & EARN", callback_data="refer", **{'style': 'success'}))
-    markup.row(InlineKeyboardButton("👤 PROFILE", callback_data="profile", **{'style': 'primary'}), InlineKeyboardButton("🎧 SUPPORT", callback_data="support", **{'style': 'danger'}))
+    
+    markup.row(InlineKeyboardButton("💳 DEPOSIT", callback_data="deposit", **{'style': 'success'}), 
+               InlineKeyboardButton("📤 WITHDRAW", callback_data="withdraw", **{'style': 'danger'}))
+               
+    markup.row(InlineKeyboardButton("📜 MY BETS", callback_data="history", **{'style': 'primary'}),
+               InlineKeyboardButton("👥 REFER & EARN", callback_data="refer", **{'style': 'success'}))
+               
+    markup.row(InlineKeyboardButton("👤 PROFILE", callback_data="profile", **{'style': 'primary'}),
+               InlineKeyboardButton("🎧 SUPPORT", callback_data="support", **{'style': 'danger'}))
+               
     markup.row(InlineKeyboardButton("🎁 PROMO CODE", callback_data="promo_menu", **{'style': 'success'}))
+               
     bot_main.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
-
-@bot_main.callback_query_handler(func=lambda call: call.data == "back_main")
-def back_main(call):
-    bot_main.delete_message(call.message.chat.id, call.message.message_id)
-    send_main_menu(call.from_user.id, call.from_user.first_name)
 
 @bot_main.callback_query_handler(func=lambda call: call.data in ["refer", "profile", "support", "promo_menu"])
 def extra_menus(call):
     user_id = call.from_user.id
     balance, _, _, ref_count = get_user(user_id)
+    
     if call.data == "refer":
         bot_link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
         text = f"🎁 *REFER & EARN* 🎁\n\nApne doston ko invite karein!\n🎉 *15 Referrals = ₹15 Bonus*\n\n📊 *Aapke Referrals:* `{ref_count} / 15`\n\n🔗 *Aapka Invite Link:*\n`{bot_link}`"
-        markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🎁 CLAIM ₹15 BONUS", callback_data="claim_referral", **{'style': 'success'}))
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🎁 CLAIM ₹15 BONUS", callback_data="claim_referral", **{'style': 'success'}))
         markup.add(InlineKeyboardButton("🔙 Back", callback_data="back_main", **{'style': 'danger'}))
+        
         bot_main.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+        
     elif call.data == "profile":
         text = f"👤 *MY PROFILE* 👤\n\n🆔 *User ID:* `{user_id}`\n💰 *Total Balance:* `₹{balance}`\n👥 *Total Refs:* `{ref_count}`\n🏅 *Status:* Active User"
         markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Back", callback_data="back_main", **{'style': 'danger'}))
         bot_main.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+        
     elif call.data == "support":
         text = f"🎧 *CUSTOMER SUPPORT* 🎧\n\nAgar aapko Deposit, Withdraw ya Game mein koi problem aa rahi hai, toh direct Admin se baat karein:\n\n💬 *Contact:* {SUPPORT_USERNAME}\n⏳ *Reply Time:* 24/7 Available"
         markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Back", callback_data="back_main", **{'style': 'danger'}))
         bot_main.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
     elif call.data == "promo_menu":
         update_user(user_id, state="wait_promo")
         bot_main.send_message(user_id, "🎁 *PROMO CODE*\n\nKripya apna Promo Code yahan type karein:", parse_mode="Markdown")
+
+@bot_main.callback_query_handler(func=lambda call: call.data == "claim_referral")
+def claim_ref_bonus(call):
+    user_id = call.from_user.id
+    bal, _, _, ref_count = get_user(user_id)
+    if ref_count >= 15:
+        new_ref = ref_count - 15
+        new_bal = bal + 15
+        update_user(user_id, balance=new_bal, refer_count=new_ref)
+        bot_main.answer_callback_query(call.id, "🎉 CONGRATULATIONS! ₹15 added to your wallet!", show_alert=True)
+        bot_main.delete_message(call.message.chat.id, call.message.message_id)
+        send_main_menu(user_id, call.from_user.first_name)
+    else:
+        bot_main.answer_callback_query(call.id, "❌ Pehle 15 Refer completely karo fir milega!", show_alert=True)
 
 # ================= 6. WINGO GAME UI =================
 @bot_main.callback_query_handler(func=lambda call: call.data.startswith("wingo_"))
@@ -181,10 +412,13 @@ def wingo_menu(call):
 
     mode_seconds = int(mode) * 60
     current_time = int(time.time())
+    
     current_period_num = current_time // mode_seconds
     next_period_num = current_period_num + 1
     period_id = f"{time.strftime('%Y%m%d')}-{mode}M-{next_period_num}"
-    time_left = (next_period_num * mode_seconds) - current_time
+    
+    expected_end_time = next_period_num * mode_seconds
+    time_left = expected_end_time - current_time
 
     markup = InlineKeyboardMarkup(row_width=5)
     markup.row(InlineKeyboardButton(f"🔄 Refresh Timer (⏳ {time_left}s left)", callback_data=f"wingo_{mode}"))
@@ -216,14 +450,19 @@ def show_trends(call):
         c = conn.cursor()
         c.execute("SELECT period, number, size, color FROM game_trends WHERE mode=%s ORDER BY id DESC LIMIT 10", (mode,))
         records = c.fetchall()
-    finally:
-        release_db(conn)
-        
+    finally: release_db(conn)
+    
     if not records:
-        bot_main.answer_callback_query(call.id, "Thoda wait karein, game history update ho rahi hai!", show_alert=True)
+        bot_main.answer_callback_query(call.id, "Thoda wait karein, pehla round khatam hone par history update hogi!", show_alert=True)
         return
-    text = f"📊 *WINGO {mode} MIN - GAME HISTORY*\n━━━━━━━━━━━━━━━━━━\n`Period` | `Num` | `Size` | `Color`\n──────────────────\n"
-    for r in records: text += f"`{r[0][-5:]}` | `{r[1]}` | `{r[2].upper()}` | `{r[3]}`\n"
+        
+    text = f"📊 *WINGO {mode} MIN - GAME HISTORY*\n━━━━━━━━━━━━━━━━━━\n"
+    text += "`Period` | `Num` | `Size` | `Color`\n"
+    text += "──────────────────\n"
+    for r in records:
+        period_short = r[0][-5:] 
+        text += f"`{period_short}` | `{r[1]}` | `{r[2].upper()}` | `{r[3]}`\n"
+        
     bot_main.answer_callback_query(call.id)
     bot_main.send_message(call.message.chat.id, text, parse_mode="Markdown")
 
@@ -233,17 +472,22 @@ def ask_bet_amount(call):
     mode = call.data.split("_")[-1]
     mode_seconds = int(mode) * 60
     current_time = int(time.time())
-    next_period_num = (current_time // mode_seconds) + 1
+    
+    current_period_num = current_time // mode_seconds
+    next_period_num = current_period_num + 1
     period_id = f"{time.strftime('%Y%m%d')}-{mode}M-{next_period_num}"
-    time_left = (next_period_num * mode_seconds) - current_time
+    
+    expected_end_time = next_period_num * mode_seconds
+    time_left = expected_end_time - current_time
     
     if time_left <= 10:
         bot_main.answer_callback_query(call.id, "⚠️ Betting is closed for this period! Please wait for next.", show_alert=True)
         return
+
     update_user(user_id, state="wait_bet", temp_data=call.data)
     bot_main.send_message(user_id, f"🆔 *Period:* `{period_id}`\n💰 Kitna amount lagana hai? (Limit: ₹10 - ₹10,000)", parse_mode="Markdown")
 
-# ================= 7. DEPOSIT/WITHDRAW/HISTORY =================
+# ================= 7. HISTORY, DEPOSIT & PROMO LOGIC =================
 @bot_main.callback_query_handler(func=lambda call: call.data == "history")
 def show_history(call):
     user_id = call.from_user.id
@@ -252,9 +496,7 @@ def show_history(call):
         c = conn.cursor()
         c.execute("SELECT action, amount, detail, timestamp FROM history WHERE user_id=%s ORDER BY id DESC LIMIT 5", (user_id,))
         records = c.fetchall()
-    finally:
-        release_db(conn)
-        
+    finally: release_db(conn)
     if not records:
         bot_main.send_message(user_id, "📭 Aapki koi bet history nahi hai.")
         return
@@ -262,23 +504,26 @@ def show_history(call):
     for r in records: hist_text += f"🔹 *{r[0]}* | ₹{r[1]}\n📝 Detail: {r[2]}\n🕒 {r[3]}\n➖➖➖➖➖➖\n"
     bot_main.send_message(user_id, hist_text, parse_mode="Markdown")
 
-@bot_main.callback_query_handler(func=lambda call: call.data == "deposit")
-def dep_menu(call):
-    markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("₹100", callback_data="dep_100", **{'style': 'success'}), InlineKeyboardButton("₹299", callback_data="dep_299", **{'style': 'success'}))
-    markup.row(InlineKeyboardButton("₹599", callback_data="dep_599", **{'style': 'success'}), InlineKeyboardButton("₹999", callback_data="dep_999", **{'style': 'success'}))
-    bot_main.send_message(call.from_user.id, "Deposit Amount select karein:", reply_markup=markup)
+@bot_main.callback_query_handler(func=lambda call: call.data in ["deposit", "withdraw", "back_main"])
+def finance_menus(call):
+    user_id = call.from_user.id
+    if call.data == "back_main":
+        bot_main.delete_message(call.message.chat.id, call.message.message_id)
+        send_main_menu(user_id, call.from_user.first_name)
+    elif call.data == "deposit":
+        markup = InlineKeyboardMarkup()
+        markup.row(InlineKeyboardButton("₹100", callback_data="dep_100", **{'style': 'success'}), InlineKeyboardButton("₹299", callback_data="dep_299", **{'style': 'success'}))
+        markup.row(InlineKeyboardButton("₹599", callback_data="dep_599", **{'style': 'success'}), InlineKeyboardButton("₹999", callback_data="dep_999", **{'style': 'success'}))
+        bot_main.send_message(user_id, "Deposit Amount select karein:", reply_markup=markup)
+    elif call.data == "withdraw":
+        update_user(user_id, state="wait_with_amt")
+        bot_main.send_message(user_id, "Kitna amount withdraw karna hai? (Min 100)")
 
 @bot_main.callback_query_handler(func=lambda call: call.data.startswith("dep_"))
 def show_qr(call):
     amt = call.data.split("_")[1]
     update_user(call.from_user.id, state="wait_ss", temp_data=amt)
     bot_main.send_photo(call.from_user.id, photo="https://files.catbox.moe/zhw20j.jpg", caption=f"₹{amt} pay karein aur Screen shot send karo.")
-
-@bot_main.callback_query_handler(func=lambda call: call.data == "withdraw")
-def with_menu(call):
-    update_user(call.from_user.id, state="wait_with_amt")
-    bot_main.send_message(call.from_user.id, "Kitna amount withdraw karna hai? (Min 100)")
 
 @bot_main.message_handler(content_types=['text', 'photo'])
 def handle_inputs(message):
@@ -293,12 +538,15 @@ def handle_inputs(message):
                 try:
                     c = conn.cursor()
                     c.execute("UPDATE users SET balance = balance - %s, state='idle', temp_data='' WHERE user_id=%s", (amt, user_id))
-                    parts = temp.split("_"); prediction = parts[1]; mode = parts[2]
+                    
+                    parts = temp.split("_")
+                    prediction = parts[1] 
+                    mode = parts[2]
+                    
                     c.execute("INSERT INTO active_bets (user_id, mode, prediction, amount) VALUES (%s, %s, %s, %s)", (user_id, mode, prediction, amt))
                     c.execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Bet Placed', %s, %s)", (user_id, amt, f"Mode: {mode}M, Choice: {prediction.upper()}"))
                     conn.commit()
-                finally:
-                    release_db(conn)
+                finally: release_db(conn)
                 bot_main.send_message(user_id, f"✅ *Bet Placed Successfully!*\n🎮 Mode: WINGO {mode} MIN\n🎯 Choice: {prediction.upper()}\n💰 Amount: ₹{amt}\n💳 Remaining Balance: ₹{bal-amt}", parse_mode="Markdown")
             else: bot_main.send_message(user_id, "❌ Balance kam hai.")
         else: bot_main.send_message(user_id, "❌ Limit: ₹10 - ₹10,000")
@@ -307,12 +555,20 @@ def handle_inputs(message):
         if message.content_type == 'photo':
             bot_main.send_message(user_id, "⏳ Admin approval ka wait karein.")
             markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("✅ Approve", callback_data=f"dapp_{user_id}_{temp}", **{'style': 'success'}), InlineKeyboardButton("❌ Reject", callback_data=f"drej_{user_id}", **{'style': 'danger'}))
+            markup.row(InlineKeyboardButton("✅ Approve", callback_data=f"dapp_{user_id}_{temp}", **{'style': 'success'}), 
+                       InlineKeyboardButton("❌ Reject", callback_data=f"drej_{user_id}", **{'style': 'danger'}))
+            
             try:
                 file_info = bot_main.get_file(message.photo[-1].file_id)
                 downloaded_file = bot_main.download_file(file_info.file_path)
-                bot_finance.send_photo(ADMIN_ID, photo=downloaded_file, caption=f"📥 *NEW DEPOSIT REQUEST*\n\n👤 User ID: `{user_id}`\n💰 Amount: `₹{temp}`", reply_markup=markup, parse_mode="Markdown")
-            except: bot_main.send_message(user_id, "❌ Screenshot process karne me dikkat aayi.")
+                caption_text = f"📥 *NEW DEPOSIT REQUEST*\n\n👤 User ID: `{user_id}`\n💰 Amount: `₹{temp}`"
+                try:
+                    bot_deposit.send_photo(ADMIN_ID, photo=downloaded_file, caption=caption_text, reply_markup=markup, parse_mode="Markdown")
+                except Exception as ex:
+                    bot_main.send_message(user_id, "❌ Admin ka deposit bot abhi start nahi hai. Please admin se bolo /start dabayein.")
+            except Exception as e:
+                bot_main.send_message(user_id, "❌ Screenshot process karne me dikkat aayi.")
+                
             update_user(user_id, state="idle", temp_data="")
         else: bot_main.reply_to(message, "Payment karo aur screen shot send karo")
         
@@ -323,22 +579,38 @@ def handle_inputs(message):
             bot_main.send_message(user_id, "Apna UPI ID aur Phone Number bhejein:")
         else: bot_main.send_message(user_id, "❌ Invalid amount ya balance kam hai.")
         
-    elif state == "wait_with_upi" and message.text:
-        upi_or_phone = message.text.strip(); amt = float(temp)
+    elif state == "wait_with_upi":
+        if not message.text:
+            bot_main.send_message(user_id, "❌ Kripya text message me UPI ya Phone number likh kar bhejein.")
+            return
+            
+        upi_or_phone = message.text.strip()
+        check_num = upi_or_phone.replace(" ", "")
+        
+        if "@" not in upi_or_phone and not (check_num.isdigit() and len(check_num) >= 10):
+            bot_main.send_message(user_id, "⚠️ *WARNING!* Galat Details!\n\nSahi UPI ID (e.g. `naam@ybl`) ya 10-digit Phone Number daalein. Kuch bhi text mat bhejein.", parse_mode="Markdown")
+            return 
+            
+        amt = float(temp)
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("✅ Approve", callback_data=f"wapp_{user_id}_{amt}", **{'style': 'success'}), InlineKeyboardButton("❌ Reject", callback_data=f"wrej_{user_id}_{amt}", **{'style': 'danger'}))
+        
         try:
-            bot_finance.send_message(ADMIN_ID, f"📤 *WITHDRAW REQUEST*\n\nUser: `{user_id}`\nAmount: ₹{amt}\nUPI/Phone: `{upi_or_phone}`", reply_markup=markup, parse_mode="Markdown")
+            bot_withdraw.send_message(ADMIN_ID, f"📤 *WITHDRAW REQUEST*\n\nUser: `{user_id}`\nAmount: ₹{amt}\nUPI/Phone: `{upi_or_phone}`", reply_markup=markup, parse_mode="Markdown")
+            
             bot_main.send_message(user_id, "⏳ Payment In Pending... Admin check kar rahe hain.")
             conn = get_db()
             try:
-                c = conn.cursor()
-                c.execute("UPDATE users SET balance = balance - %s WHERE user_id=%s", (amt, user_id))
-                c.execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Withdraw Requested', %s, %s)", (user_id, amt, f"UPI: {upi_or_phone}"))
+                conn.cursor().execute("UPDATE users SET balance = balance - %s WHERE user_id=%s", (amt, user_id))
+                conn.cursor().execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Withdraw Requested', %s, %s)", (user_id, amt, f"UPI: {upi_or_phone}"))
                 conn.commit()
-            finally:
-                release_db(conn)
-        except: bot_main.send_message(user_id, "❌ Error connecting to admin bot.")
+            finally: release_db(conn)
+            
+        except Exception as e:
+            bot_main.send_message(user_id, f"❌ Withdraw request fail ho gayi. Admin ka withdraw bot chalu nahi hai!")
+            update_user(user_id, state="idle", temp_data="")
+            return
+
         update_user(user_id, state="idle", temp_data="")
 
     elif state == "wait_promo" and message.text:
@@ -351,8 +623,10 @@ def handle_inputs(message):
                 bot_main.send_message(user_id, "❌ Aap ye promo code pehle hi use kar chuke hain.")
                 update_user(user_id, state="idle")
                 return
+                
             c.execute("SELECT amount, uses_left FROM promo_codes WHERE code=%s", (code,))
             promo = c.fetchone()
+            
             if promo and promo[1] > 0:
                 p_amt = promo[0]
                 c.execute("UPDATE users SET balance = balance + %s WHERE user_id=%s", (p_amt, user_id))
@@ -362,76 +636,101 @@ def handle_inputs(message):
                 bot_main.send_message(user_id, f"🎉 *YAY!* Promo Code Applied!\n🎁 *₹{p_amt}* added to your wallet.", parse_mode="Markdown")
             else:
                 bot_main.send_message(user_id, "❌ Invalid Promo Code ya Limit khatam ho chuki hai.")
-        finally:
-            release_db(conn)
+        finally: release_db(conn)
         update_user(user_id, state="idle")
 
 # ================= 8. ADMIN APPROVAL BOTS =================
 @bot_finance.callback_query_handler(func=lambda call: call.data.split('_')[0] in ["dapp", "drej", "wapp", "wrej"])
 def finance_admin(call):
     data = call.data.split("_")
-    action = data[0]; user_id = int(data[1])
+    action = data[0]
+    user_id = int(data[1])
     
     if action == "dapp":
-        amt = float(data[2]); bal, _, _, _ = get_user(user_id); update_user(user_id, balance=bal+amt)
+        amt = float(data[2])
+        bal, _, _, _ = get_user(user_id)
+        update_user(user_id, balance=bal+amt)
+        
         conn = get_db()
         try:
             conn.cursor().execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Deposit Approved', %s, 'Via Admin')", (user_id, amt))
             conn.commit()
         except: pass
         finally: release_db(conn)
-        try: bot_finance.edit_message_caption(f"✅ ₹{amt} Approved for {user_id}", call.message.chat.id, call.message.message_id)
-        except: bot_finance.edit_message_text(f"✅ ₹{amt} Approved for {user_id}", call.message.chat.id, call.message.message_id)
+        
+        try: bot_deposit.edit_message_caption(f"✅ ₹{amt} Approved for {user_id}", call.message.chat.id, call.message.message_id)
+        except: bot_deposit.edit_message_text(f"✅ ₹{amt} Approved for {user_id}", call.message.chat.id, call.message.message_id)
         bot_main.send_message(user_id, f"✅ *Deposit Successful!*\n₹{amt} added to your wallet.", parse_mode="Markdown")
         
     elif action == "drej":
-        try: bot_finance.edit_message_caption(f"❌ Rejected for {user_id}", call.message.chat.id, call.message.message_id)
-        except: bot_finance.edit_message_text(f"❌ Rejected for {user_id}", call.message.chat.id, call.message.message_id)
+        try: bot_deposit.edit_message_caption(f"❌ Rejected for {user_id}", call.message.chat.id, call.message.message_id)
+        except: bot_deposit.edit_message_text(f"❌ Rejected for {user_id}", call.message.chat.id, call.message.message_id)
         bot_main.send_message(user_id, "❌ *PAYMENT REJECTED!* Real payment karo aur screenshot send karo.", parse_mode="Markdown")
 
     elif action == "wapp":
-        amt = float(data[2]); bot_finance.edit_message_text(f"✅ Withdraw ₹{amt} Approved", call.message.chat.id, call.message.message_id)
+        amt = float(data[2])
+        bot_withdraw.edit_message_text(f"✅ Withdraw ₹{amt} Approved", call.message.chat.id, call.message.message_id)
         bot_main.send_message(user_id, f"✅ Aapke UPI id par ₹{amt} aa chuka hai.")
         
     elif action == "wrej":
-        amt = float(data[2]); bal, _, _, _ = get_user(user_id); update_user(user_id, balance=bal+amt)
+        amt = float(data[2])
+        bal, _, _, _ = get_user(user_id)
+        update_user(user_id, balance=bal+amt)
+        
         conn = get_db()
         try:
             conn.cursor().execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Withdraw Rejected', %s, 'Refunded')", (user_id, amt))
             conn.commit()
         except: pass
         finally: release_db(conn)
-        bot_finance.edit_message_text(f"❌ Withdraw Rejected", call.message.chat.id, call.message.message_id)
+        
+        bot_withdraw.edit_message_text(f"❌ Withdraw Rejected", call.message.chat.id, call.message.message_id)
         bot_main.send_message(user_id, "❌ Withdraw Reject ho gaya hai. Balance wapas add kar diya gaya hai.")
 
-# ================= 9. POPUP IMAGE GENERATOR =================
+# ================= 9. ADVANCED POPUP IMAGE GENERATOR =================
 def get_best_font(size, bold=False):
-    paths = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "arial.ttf"]
+    paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "arial.ttf"
+    ]
     for p in paths:
         try: return ImageFont.truetype(p, size)
         except: pass
     return ImageFont.load_default()
 
 def create_popup_image(result_type, amount, period_id):
-    popup = Image.new("RGBA", (500, 350), (255, 255, 255, 0)); draw = ImageDraw.Draw(popup)
+    popup = Image.new("RGBA", (500, 350), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(popup)
+    
     start_col = (255, 90, 90) if result_type == "loss" else (40, 200, 90)
     end_col = (255, 150, 150) if result_type == "loss" else (100, 255, 150)
+
     for y in range(350):
         r = int(start_col[0] + (end_col[0] - start_col[0]) * y / 350)
         g = int(start_col[1] + (end_col[1] - start_col[1]) * y / 350)
         b = int(start_col[2] + (end_col[2] - start_col[2]) * y / 350)
         draw.line((0, y, 500, y), fill=(r, g, b))
+
     draw.rounded_rectangle([(30, 80), (470, 280)], radius=20, fill=(255, 255, 255))
-    font_xl = get_best_font(35, True); font_l = get_best_font(28, True); font_m = get_best_font(18, False)
+    
+    font_xl = get_best_font(35, True)
+    font_l = get_best_font(28, True)
+    font_m = get_best_font(18, False)
+
     if result_type == "win":
         draw.text((120, 25), "🏆 YOU WON! 🏆", font=font_xl, fill=(255, 255, 255))
         draw.text((150, 140), f"Bonus: ₹{amount}", font=font_l, fill=(40, 200, 90))
     else:
         draw.text((100, 25), "😢 BETTER LUCK! 😢", font=font_xl, fill=(255, 255, 255))
         draw.text((170, 140), "Try Again!", font=font_l, fill=(255, 90, 90))
+        
     draw.text((130, 220), f"Period: {period_id}", font=font_m, fill=(100, 100, 100))
-    bio = io.BytesIO(); bio.name = 'result.png'
-    popup.save(bio, 'PNG'); bio.seek(0)
+    
+    bio = io.BytesIO()
+    bio.name = 'result.png'
+    popup.save(bio, 'PNG')
+    bio.seek(0)
     return bio
 
 # ================= 10. UNIFIED GAME ENGINES =================
@@ -442,14 +741,21 @@ def run_game_engine(mode, total_seconds):
             current_period_num = now // total_seconds
             next_period_num = current_period_num + 1
             period_id = f"{time.strftime('%Y%m%d')}-{mode}M-{next_period_num}"
-            time_left = (next_period_num * total_seconds) - int(time.time())
             
-            if time_left <= 0: time.sleep(1); continue
+            end_time = next_period_num * total_seconds
+            time_left = end_time - int(time.time())
+            
+            if time_left <= 0:
+                time.sleep(1)
+                continue
 
             conn = get_db()
             try:
                 c = conn.cursor()
-                random.seed(f"WINGO_{period_id}"); number = random.randint(0, 9); random.seed() 
+                random.seed(f"WINGO_{period_id}")
+                number = random.randint(0, 9)
+                random.seed() 
+                
                 size = "big" if number >= 5 else "sml"
                 if number in [1, 3, 7, 9]: color_text = "GREEN"
                 elif number in [2, 4, 6, 8]: color_text = "RED"
@@ -460,12 +766,12 @@ def run_game_engine(mode, total_seconds):
                 if not c.fetchone():
                     c.execute("INSERT INTO period_data (mode, period_id, number, color, size) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (mode) DO UPDATE SET period_id=EXCLUDED.period_id, number=EXCLUDED.number, color=EXCLUDED.color, size=EXCLUDED.size", (mode, period_id, str(number), color_text, size))
                     conn.commit()
+                    
                     try:
                         msg = f"🔮 *LIVE WINGO {mode} MIN PREDICTION*\n\n🆔 Period: `{period_id}`\n🎯 Expected Color: *{color_text}*\n🎯 Expected Size: *{size.upper()}*\n🔢 Expected Number: *{number}*\n\n⏳ Result in {time_left} Seconds! Bet Now!"
                         bot_prediction.send_message(PREDICTION_CHANNEL, msg, parse_mode="Markdown")
-                    except: pass
-            finally:
-                release_db(conn)
+                    except Exception as e: pass
+            finally: release_db(conn)
 
             number_str = str(number)
             if color_text == "GREEN": color_codes = ["grn"]
@@ -473,24 +779,31 @@ def run_game_engine(mode, total_seconds):
             elif color_text == "RED / VIOLET": color_codes = ["red", "vio"]
             elif color_text == "GREEN / VIOLET": color_codes = ["grn", "vio"]
 
-            sleep_time = (next_period_num * total_seconds) - time.time()
-            if sleep_time > 0: time.sleep(sleep_time + 1)
+            sleep_time = end_time - time.time()
+            if sleep_time > 0:
+                time.sleep(sleep_time + 1)
             
             conn = get_db()
             try:
                 c = conn.cursor()
                 c.execute("SELECT id FROM game_trends WHERE mode=%s AND period=%s", (mode, period_id))
                 if c.fetchone(): 
-                    release_db(conn); continue
+                    continue
                     
                 c.execute("INSERT INTO game_trends (mode, period, number, color, size) VALUES (%s, %s, %s, %s, %s)", (mode, period_id, number, color_text, size))
+                
                 c.execute("SELECT id, user_id, prediction, amount FROM active_bets WHERE mode=%s", (mode,))
                 bets = c.fetchall()
                 
                 for bet in bets:
-                    bet_id, uid, pred, amt = bet; win = False; multiplier = 0
-                    if pred == number_str: win = True; multiplier = 9
-                    elif pred in ["big", "sml"] and pred == size: win = True; multiplier = 2
+                    bet_id, uid, pred, amt = bet
+                    win = False
+                    multiplier = 0
+
+                    if pred == number_str: 
+                        win = True; multiplier = 9
+                    elif pred in ["big", "sml"] and pred == size:
+                        win = True; multiplier = 2
                     elif pred in color_codes:
                         win = True
                         if pred == "vio": multiplier = 4.5
@@ -508,19 +821,20 @@ def run_game_engine(mode, total_seconds):
                         c.execute("INSERT INTO history (user_id, action, amount, detail) VALUES (%s, 'Lost Bet', %s, %s)", (uid, amt, f"Wingo {mode}M. Result was {color_text}/{size.upper()}/{number}"))
                         try: bot_main.send_photo(uid, photo=create_popup_image("loss", 0, period_id), caption=f"❌ *BET LOST!* ❌\n━━━━━━━━━━━━━━━━━━\n🎮 Mode: WINGO {mode} MIN\n🆔 Period: `{period_id}`\n🤦‍♂️ Your Choice: *{pred.upper()}*\n🛑 Actual Result: *{color_text} / {size.upper()} / {number}*\n💸 Amount Lost: ₹{amt}\n\n*Better luck next time!* 📉\n━━━━━━━━━━━━━━━━━━", parse_mode="Markdown")
                         except: pass
+                        
                     c.execute("DELETE FROM active_bets WHERE id=%s", (bet_id,))
-                    
                 conn.commit()
-            finally:
-                release_db(conn)
+            finally: release_db(conn)
         except Exception as e: print(f"Engine Error: {e}"); time.sleep(3)
 
-# ================= 11. FLASK SERVER =================
+# ================= 11. FLASK SERVER FOR RENDER =================
 app = Flask(__name__)
-@app.route('/')
-def home(): return "🚀 Wingo Platform is Live on Render & Supabase!"
 
-# ================= 12. RUN BOTS & ENGINES =================
+@app.route('/')
+def home():
+    return "🚀 Wingo Platform is Live and Running on Render!"
+
+# ================= 12. RUN ALL BOTS & ENGINES =================
 def start_bot_threads():
     threading.Thread(target=lambda: bot_main.infinity_polling(skip_pending=True)).start()
     threading.Thread(target=lambda: bot_finance.infinity_polling(skip_pending=True)).start()
@@ -533,4 +847,5 @@ def start_bot_threads():
 if __name__ == "__main__":
     print("🚀 All Bots & Game Engines Running...")
     start_bot_threads()   
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
