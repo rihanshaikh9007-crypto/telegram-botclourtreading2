@@ -22,7 +22,8 @@ InlineKeyboardButton.to_dict = custom_to_dict
 # Supabase PostgreSQL Link with Password and SSL Security
 DATABASE_URL = "postgresql://postgres.jhhmwbivhohvcicyuxqe:mQcGVnP7gMFHQjYE@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres?sslmode=require"
 
-MAIN_TOKEN = "8645722066:AAFSnOXF-6WCgkrTrZ-4OiMsI3QX13zhm7Y"
+# 🚨 NAYA MAIN TOKEN YAHAN ADD HO GAYA HAI 🚨
+MAIN_TOKEN = "8645722066:AAGxOfVbeF2HdClK-XqGzACHbcvd01iVLsA"
 DEPOSIT_TOKEN = "8632940940:AAEFodamODSaY3EdsuY4s24P-Gq-pcHrB1o"
 PREDICTION_TOKEN = "8711568633:AAHAnNKdG7XkawHOPD2insGmPgDgwY095X0" 
 
